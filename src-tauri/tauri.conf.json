@@ -14,6 +14,7 @@
       {
         "label": "main",
         "title": "OCR Scan Tool",
+        "create": false,
         "width": 900,
         "height": 640,
         "minWidth": 700,
@@ -25,6 +26,7 @@
       {
         "label": "overlay",
         "title": "Select Region",
+        "create": false,
         "visible": false,
         "decorations": false,
         "transparent": true,

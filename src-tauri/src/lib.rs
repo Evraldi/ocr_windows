@@ -329,6 +329,10 @@ pub fn run() {
                 ocr: Mutex::new(None),
             });
 
+            for window_config in app.config().app.windows.iter() {
+                tauri::WebviewWindowBuilder::from_config(app, window_config)?.build()?;
+            }
+
             let handle = app.handle().clone();
             tauri::async_runtime::spawn_blocking(move || {
                 match load_ocr_engine(&handle) {
