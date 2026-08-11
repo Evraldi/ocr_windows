@@ -323,19 +323,25 @@ pub fn run() {
 
             let dir = app.path().app_data_dir()?;
             let hist = history::History::new(&dir)?;
-            let ocr = match load_ocr_engine(app.handle()) {
-                Ok(engine) => {
-                    log::info!("[ocr] PaddleOCR engine ready ({})", ocr_text::status());
-                    Some(engine)
-                }
-                Err(e) => {
-                    log::error!("[ocr] failed to initialize engine: {e}");
-                    None
-                }
-            };
+
             app.manage(AppState {
                 history: Mutex::new(hist),
-                ocr: Mutex::new(ocr),
+                ocr: Mutex::new(None),
+            });
+
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                match load_ocr_engine(&handle) {
+                    Ok(engine) => {
+                        log::info!("[ocr] PaddleOCR engine ready ({})", ocr_text::status());
+                        if let Some(state) = handle.try_state::<AppState>() {
+                            if let Ok(mut guard) = state.ocr.lock() {
+                                *guard = Some(engine);
+                            }
+                        }
+                    }
+                    Err(e) => log::error!("[ocr] failed to initialize engine: {e}"),
+                }
             });
 
             let show = MenuItem::with_id(app, "show", "Open OCR Scan Tool", true, None::<&str>)?;
