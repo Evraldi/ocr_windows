@@ -15,6 +15,7 @@
         "label": "main",
         "title": "OCR Scan Tool",
         "create": false,
+        "visible": false,
         "width": 900,
         "height": 640,
         "minWidth": 700,

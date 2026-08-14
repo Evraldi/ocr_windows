@@ -86,10 +86,20 @@ fn show_main(app: &AppHandle) {
 }
 
 fn make_preview(img: &DynamicImage) -> Option<String> {
-    let thumb = img.thumbnail(480, 480);
+    let max_dim = 1600u32;
+    let (w, h) = (img.width(), img.height());
+    let scaled = if w.max(h) > max_dim {
+        let scale = max_dim as f64 / f64::from(w.max(h));
+        img.thumbnail(
+            (f64::from(w) * scale).round().max(1.0) as u32,
+            (f64::from(h) * scale).round().max(1.0) as u32,
+        )
+    } else {
+        img.clone()
+    };
     let mut buf = Vec::new();
     let cursor = Cursor::new(&mut buf);
-    if thumb.write_to(cursor, ImageFormat::Png).is_err() {
+    if scaled.write_to(cursor, ImageFormat::Png).is_err() {
         return None;
     }
     Some(base64::engine::general_purpose::STANDARD.encode(&buf))
@@ -360,7 +370,17 @@ pub fn run() {
             if let Some(icon) = app.default_window_icon() {
                 tray = tray.icon(icon.clone());
             }
-            tray.on_menu_event(|app, event| match event.id().as_ref() {
+            tray.on_tray_icon_event(|tray, event| {
+                if let tauri::tray::TrayIconEvent::Click {
+                    button: tauri::tray::MouseButton::Left,
+                    button_state: tauri::tray::MouseButtonState::Up,
+                    ..
+                } = event
+                {
+                    show_main(tray.app_handle());
+                }
+            })
+            .on_menu_event(|app, event| match event.id().as_ref() {
                 "show" => show_main(app),
                 "scan" => {
                     if let Err(e) = show_overlay(app) {

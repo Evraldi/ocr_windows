@@ -14,6 +14,7 @@ export default function Home() {
   const [last, setLast] = useState<ScanResult | null>(null);
   const [busy, setBusy] = useState(false);
   const [autoStart, setAutoStart] = useState(false);
+  const [viewImage, setViewImage] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
   const refresh = useCallback(async () => {
@@ -40,6 +41,14 @@ export default function Home() {
     },
     [refresh]
   );
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setViewImage(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   useEffect(() => {
     api.appInfo().then(setInfo).catch((e) => setToast({ text: String(e), ok: false }));
@@ -239,7 +248,8 @@ export default function Home() {
               <img
                 src={`data:image/png;base64,${last.preview}`}
                 alt="captured region"
-                className="h-16 w-16 rounded border border-zinc-700 object-contain"
+                onClick={() => setViewImage(last.preview!)}
+                className="h-16 w-16 cursor-pointer rounded border border-zinc-700 object-contain transition-colors hover:border-emerald-500"
               />
             )}
             <div className="min-w-0 flex-1">
@@ -256,6 +266,14 @@ export default function Home() {
             >
               Copy
             </button>
+            {last.preview && (
+              <button
+                onClick={() => setViewImage(last.preview!)}
+                className="rounded-lg bg-zinc-800 px-3 py-1.5 text-xs text-zinc-200 transition-colors hover:bg-zinc-700"
+              >
+                View
+              </button>
+            )}
           </div>
         </section>
       )}
@@ -286,7 +304,8 @@ export default function Home() {
                   <img
                     src={`data:image/png;base64,${h.preview}`}
                     alt="captured region"
-                    className="mt-0.5 h-12 w-12 flex-none rounded border border-zinc-700 object-contain"
+                    onClick={() => setViewImage(h.preview!)}
+                    className="mt-0.5 h-12 w-12 flex-none cursor-pointer rounded border border-zinc-700 object-contain transition-colors hover:border-emerald-500"
                   />
                 ) : (
                   <div className="mt-0.5 h-12 w-12 flex-none rounded border border-zinc-800" />
@@ -312,6 +331,14 @@ export default function Home() {
                   </p>
                 </div>
                 <div className="flex flex-none items-center gap-1">
+                  {h.preview && (
+                    <button
+                      onClick={() => setViewImage(h.preview!)}
+                      className="rounded-lg bg-zinc-800 px-3 py-1.5 text-xs text-zinc-200 opacity-0 transition-opacity hover:bg-zinc-700 group-hover:opacity-100"
+                    >
+                      View
+                    </button>
+                  )}
                   <button
                     onClick={() => copy(h.content)}
                     className="rounded-lg bg-zinc-800 px-3 py-1.5 text-xs text-zinc-200 opacity-0 transition-opacity hover:bg-zinc-700 group-hover:opacity-100"
@@ -331,6 +358,27 @@ export default function Home() {
           </ul>
         )}
       </div>
+
+      {viewImage && (
+        <div
+          className="fixed inset-0 z-50 flex cursor-zoom-out items-center justify-center bg-black/85 p-6"
+          onClick={() => setViewImage(null)}
+        >
+          <div className="relative flex max-h-full max-w-full items-center justify-center">
+            <img
+              src={`data:image/png;base64,${viewImage}`}
+              alt="full-size preview"
+              className="max-h-full max-w-full rounded object-contain"
+            />
+          </div>
+          <button
+            onClick={() => setViewImage(null)}
+            className="absolute right-4 top-4 rounded-full bg-zinc-800 px-3 py-1.5 text-sm text-zinc-200 transition-colors hover:bg-zinc-700"
+          >
+            ✕ Close
+          </button>
+        </div>
+      )}
     </main>
   );
 }
