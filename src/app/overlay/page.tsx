@@ -1,63 +1,96 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "@/lib/api";
+import { clampPoint, rectBetween } from "@/lib/selection";
+import type { Point, Rect } from "@/lib/selection";
 
-interface Point {
-  x: number;
-  y: number;
-}
+const clamp = (x: number, y: number): Point =>
+  clampPoint(x, y, window.innerWidth, window.innerHeight);
 
 export default function Overlay() {
-  const [start, setStart] = useState<Point | null>(null);
-  const [current, setCurrent] = useState<Point | null>(null);
-  const [finishing, setFinishing] = useState(false);
+  // Pakai ref untuk koordinat: mouseup bisa terjadi di luar webview, jadi
+  // state React bisa stale kalau cuma mengandalkan event handler di elemen.
+  const start = useRef<Point | null>(null);
+  const current = useRef<Point | null>(null);
   const dragging = useRef(false);
+  const finishingRef = useRef(false);
+  const [rect, setRect] = useState<Rect | null>(null);
+  const [finishing, setFinishing] = useState(false);
 
-  const rect = (() => {
-    if (!start || !current) return null;
-    const x = Math.min(start.x, current.x);
-    const y = Math.min(start.y, current.y);
-    const width = Math.abs(current.x - start.x);
-    const height = Math.abs(current.y - start.y);
-    return { x, y, width, height };
-  })();
-
-  const onMouseDown = (e: React.MouseEvent) => {
-    if (finishing) return;
-    dragging.current = true;
-    setStart({ x: e.clientX, y: e.clientY });
-    setCurrent({ x: e.clientX, y: e.clientY });
-  };
-
-  const onMouseMove = (e: React.MouseEvent) => {
-    if (!dragging.current) return;
-    setCurrent({ x: e.clientX, y: e.clientY });
-  };
-
-  const onMouseUp = () => {
-    if (!dragging.current || !start || !current) return;
+  const reset = useCallback(() => {
     dragging.current = false;
-    const x = Math.min(start.x, current.x);
-    const y = Math.min(start.y, current.y);
-    const width = Math.abs(current.x - start.x);
-    const height = Math.abs(current.y - start.y);
-    if (width > 3 && height > 3) {
-      setFinishing(true);
-      api
-        .finishScan({ x, y, width, height }, window.devicePixelRatio)
-        .catch(() => api.cancelScan())
-        .finally(() => {
-          setFinishing(false);
-          setStart(null);
-          setCurrent(null);
-        });
-    } else {
+    start.current = null;
+    current.current = null;
+    setRect(null);
+  }, []);
+
+  const onMouseDown = useCallback(
+    (e: React.MouseEvent) => {
+      if (finishingRef.current || e.button !== 0) return;
+      const p = clamp(e.clientX, e.clientY);
+      dragging.current = true;
+      start.current = p;
+      current.current = p;
+      setRect(rectBetween(p, p));
+    },
+    []
+  );
+
+  const onMouseUp = useCallback(() => {
+    if (!dragging.current || finishingRef.current) return;
+    dragging.current = false;
+
+    const selected = rectBetween(start.current, current.current);
+    if (!selected || selected.width <= 3 || selected.height <= 3) {
+      reset();
       api.cancelScan().catch(() => undefined);
-      setStart(null);
-      setCurrent(null);
+      return;
     }
-  };
+
+    finishingRef.current = true;
+    setFinishing(true);
+    api
+      .finishScan(selected, window.devicePixelRatio)
+      .catch((err) => {
+        api.cancelScan().catch(() => undefined);
+        throw err;
+      })
+      .finally(() => {
+        finishingRef.current = false;
+        setFinishing(false);
+        reset();
+      });
+  }, [reset]);
+
+  useEffect(() => {
+    const onMouseMove = (e: MouseEvent) => {
+      if (!dragging.current) return;
+      current.current = clamp(e.clientX, e.clientY);
+      setRect(rectBetween(start.current, current.current));
+    };
+    const onBlur = () => {
+      if (!dragging.current) return;
+      reset();
+      api.cancelScan().catch(() => undefined);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      reset();
+      api.cancelScan().catch(() => undefined);
+    };
+
+    window.addEventListener("mousemove", onMouseMove);
+    window.addEventListener("mouseup", onMouseUp);
+    window.addEventListener("blur", onBlur);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("mousemove", onMouseMove);
+      window.removeEventListener("mouseup", onMouseUp);
+      window.removeEventListener("blur", onBlur);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [onMouseUp, reset]);
 
   useEffect(() => {
     document.documentElement.style.background = "transparent";
@@ -68,22 +101,10 @@ export default function Overlay() {
     };
   }, []);
 
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        api.cancelScan().catch(() => undefined);
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, []);
-
   return (
     <div
       className="fixed inset-0 cursor-crosshair select-none overflow-hidden"
       onMouseDown={onMouseDown}
-      onMouseMove={onMouseMove}
-      onMouseUp={onMouseUp}
     >
       <div className="absolute inset-0 bg-black/20" />
 

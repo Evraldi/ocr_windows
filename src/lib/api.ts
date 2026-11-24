@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { withTimeout } from "./timeout";
 
 export interface Region {
   x: number;
@@ -30,27 +31,33 @@ export interface AppInfo {
   shortcut: string;
 }
 
+const QUICK_TIMEOUT = 10_000;
+const SCAN_TIMEOUT = 30_000;
+
+function call<T>(command: string, args?: Record<string, unknown>, timeout = QUICK_TIMEOUT) {
+  return withTimeout(invoke<T>(command, args), timeout, command);
+}
+
 export const api = {
-  startScan: () => invoke("start_scan"),
-  cancelScan: () => invoke("cancel_scan"),
+  startScan: () => call("start_scan"),
+  cancelScan: () => call("cancel_scan"),
   finishScan: (region: Region, dpr: number) =>
-    invoke<ScanResult>("finish_scan", { region, dpr }),
+    call<ScanResult>("finish_scan", { region, dpr }, SCAN_TIMEOUT),
   scanImage: (imageB64: string) =>
-    invoke<ScanResult>("scan_image", { imageB64 }),
+    call<ScanResult>("scan_image", { imageB64 }, SCAN_TIMEOUT),
   scanClipboardImage: () =>
-    invoke<ScanResult | null>("scan_clipboard_image"),
-  getHistory: () => invoke<HistoryEntry[]>("get_history"),
-  clearHistory: () => invoke("clear_history"),
-  deleteHistoryEntry: (id: number) =>
-    invoke("delete_history_entry", { id }),
-  copyToClipboard: (content: string) =>
-    invoke("copy_to_clipboard", { content }),
-  setAutostart: (enabled: boolean) =>
-    invoke("set_autostart", { enabled }),
-  getAutostart: () => invoke<boolean>("get_autostart"),
-  appInfo: () => invoke<AppInfo>("app_info"),
+    call<ScanResult | null>("scan_clipboard_image", undefined, SCAN_TIMEOUT),
+  getHistory: () => call<HistoryEntry[]>("get_history"),
+  clearHistory: () => call("clear_history"),
+  deleteHistoryEntry: (id: number) => call("delete_history_entry", { id }),
+  copyToClipboard: (content: string) => call("copy_to_clipboard", { content }),
+  setAutostart: (enabled: boolean) => call("set_autostart", { enabled }),
+  getAutostart: () => call<boolean>("get_autostart"),
+  appInfo: () => call<AppInfo>("app_info"),
   onScanResult: (cb: (r: ScanResult) => void) =>
     listen<ScanResult>("scan-result", (event) => cb(event.payload)),
+  onScanError: (cb: (message: string) => void) =>
+    listen<string>("scan-error", (event) => cb(event.payload)),
 };
 
 export function formatTimestamp(ts: number): string {

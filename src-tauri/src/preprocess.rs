@@ -14,8 +14,12 @@ pub fn enhanced_luma(img: &DynamicImage) -> LumaCandidate {
     let h = stretched.height();
     let scale = upscale_factor(w.min(h));
     if scale > 1 && w < MAX_DECODE_DIM && h < MAX_DECODE_DIM {
-        let resized =
-            image::imageops::resize(&stretched, w * scale, h * scale, image::imageops::FilterType::Lanczos3);
+        let resized = image::imageops::resize(
+            &stretched,
+            w * scale,
+            h * scale,
+            image::imageops::FilterType::Lanczos3,
+        );
         let (rw, rh) = (resized.width(), resized.height());
         (resized.into_raw(), rw, rh)
     } else {
@@ -34,7 +38,12 @@ pub fn variants(img: &DynamicImage) -> Vec<LumaCandidate> {
 
     let scale = upscale_factor(w.min(h));
     let scaled = if scale > 1 && w < MAX_DECODE_DIM && h < MAX_DECODE_DIM {
-        image::imageops::resize(&gray, w * scale, h * scale, image::imageops::FilterType::Lanczos3)
+        image::imageops::resize(
+            &gray,
+            w * scale,
+            h * scale,
+            image::imageops::FilterType::Lanczos3,
+        )
     } else {
         gray.clone()
     };
@@ -80,6 +89,5 @@ fn upscale_factor(min_dim: u32) -> u32 {
     if min_dim >= MIN_DIM_FOR_DECODE {
         return 1;
     }
-    let factor = (MIN_DIM_FOR_DECODE + min_dim - 1) / min_dim;
-    factor.min(8)
+    MIN_DIM_FOR_DECODE.div_ceil(min_dim).min(8)
 }

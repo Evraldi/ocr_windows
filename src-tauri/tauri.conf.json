@@ -22,7 +22,8 @@
         "minHeight": 480,
         "resizable": true,
         "fullscreen": false,
-        "center": true
+        "center": true,
+        "dragDropEnabled": false
       },
       {
         "label": "overlay",
@@ -37,16 +38,35 @@
         "resizable": false,
         "focusable": true,
         "fullscreen": false,
-        "url": "/overlay"
+        "url": "/overlay",
+        "dragDropEnabled": false
       }
     ],
     "security": {
-      "csp": null
+      "csp": {
+        "default-src": "'self' asset:",
+        "connect-src": "ipc: http://ipc.localhost",
+        "script-src": "'self' 'unsafe-inline'",
+        "style-src": "'self' 'unsafe-inline'",
+        "img-src": "'self' asset: data: blob:",
+        "font-src": "'self' data:"
+      },
+      "devCsp": {
+        "default-src": "'self' asset:",
+        "connect-src": "ipc: http://ipc.localhost http://localhost:3000 ws://localhost:3000",
+        "script-src": "'self' 'unsafe-inline' 'unsafe-eval'",
+        "style-src": "'self' 'unsafe-inline'",
+        "img-src": "'self' asset: data: blob:",
+        "font-src": "'self' data:"
+      },
+      "capabilities": [
+        "default"
+      ]
     }
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["nsis", "msi"],
     "resources": {
       "resources/models/*": "models/"
     },

@@ -14,8 +14,9 @@ pub fn read_image_png() -> Result<Option<Vec<u8>>, String> {
         Err(arboard::Error::ContentNotAvailable) => return Ok(None),
         Err(e) => return Err(e.to_string()),
     };
-    let rgba = image::RgbaImage::from_raw(img.width as u32, img.height as u32, img.bytes.into_owned())
-        .ok_or_else(|| "invalid clipboard image".to_string())?;
+    let rgba =
+        image::RgbaImage::from_raw(img.width as u32, img.height as u32, img.bytes.into_owned())
+            .ok_or_else(|| "invalid clipboard image".to_string())?;
     let mut buf = Vec::new();
     image::DynamicImage::ImageRgba8(rgba)
         .write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)

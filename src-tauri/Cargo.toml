@@ -1,10 +1,9 @@
 [package]
 name = "app"
 version = "0.1.0"
-description = "OCR Scan Tool - barcode/QR decode + text OCR from screen region"
-authors = ["you"]
-license = ""
-repository = ""
+description = "Windows desktop OCR scan tool: region capture, barcode/QR decode, PaddleOCR text fallback, clipboard and local history"
+authors = ["Evraldi"]
+license = "UNLICENSED"
 edition = "2021"
 rust-version = "1.77.2"
 
@@ -22,6 +21,7 @@ log = "0.4"
 tauri = { version = "2.11.3", features = ["tray-icon"] }
 tauri-plugin-log = "2"
 tauri-plugin-global-shortcut = "2"
+tauri-plugin-single-instance = "2"
 xcap = "0.4"
 rxing = "0.6"
 arboard = "3"

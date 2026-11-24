@@ -7,10 +7,7 @@ pub fn decode(img: &DynamicImage) -> Vec<(String, String)> {
     for (luma, w, h) in preprocess::variants(img) {
         if let Ok(results) = rxing::helpers::detect_multiple_in_luma(luma, w, h) {
             for r in results {
-                let pair = (
-                    r.getText().to_string(),
-                    r.getBarcodeFormat().to_string(),
-                );
+                let pair = (r.getText().to_string(), r.getBarcodeFormat().to_string());
                 if !found.contains(&pair) {
                     found.push(pair);
                 }
@@ -31,7 +28,7 @@ mod tests {
     use rxing::{BarcodeFormat, MultiFormatWriter, Writer};
 
     fn qr_image(contents: &str, scale: u32) -> DynamicImage {
-        let writer = MultiFormatWriter::default();
+        let writer = MultiFormatWriter;
         let matrix = writer
             .encode(contents, &BarcodeFormat::QR_CODE, 0, 0)
             .expect("encode failed");
@@ -39,7 +36,7 @@ mod tests {
     }
 
     fn code128_image(contents: &str, scale: u32) -> DynamicImage {
-        let writer = MultiFormatWriter::default();
+        let writer = MultiFormatWriter;
         let matrix = writer
             .encode(contents, &BarcodeFormat::CODE_128, 0, 100)
             .expect("encode failed");

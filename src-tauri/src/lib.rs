@@ -25,6 +25,10 @@ use crate::models::{AppInfo, HistoryEntry, Region, ScanResult};
 pub struct AppState {
     history: Mutex<history::History>,
     ocr: Mutex<Option<OcrLite>>,
+    /// Origin (physical pixels) dari overlay window saat terakhir dibuka.
+    /// Region dari frontend adalah CSS relatif overlay, jadi harus
+    /// ditambahkan origin ini sebelum dipetakan ke monitor physical.
+    overlay_origin: Mutex<(i32, i32)>,
 }
 
 const SCAN_SHORTCUT: &str = "CommandOrControl+Shift+S";
@@ -41,20 +45,31 @@ fn show_overlay(app: &AppHandle) -> Result<(), String> {
         .cursor_position()
         .ok()
         .and_then(|pos| {
-            app.available_monitors()
-                .ok()
-                .and_then(|mons| {
-                    mons.into_iter().find(|m| {
-                        let p = m.position();
-                        let s = m.size();
-                        (pos.x >= p.x as f64)
-                            && (pos.y >= p.y as f64)
-                            && (pos.x < p.x as f64 + s.width as f64)
-                            && (pos.y < p.y as f64 + s.height as f64)
-                    })
+            app.available_monitors().ok().and_then(|mons| {
+                mons.into_iter().find(|m| {
+                    let p = m.position();
+                    let s = m.size();
+                    (pos.x >= p.x as f64)
+                        && (pos.y >= p.y as f64)
+                        && (pos.x < p.x as f64 + s.width as f64)
+                        && (pos.y < p.y as f64 + s.height as f64)
                 })
+            })
         })
         .or_else(|| app.primary_monitor().ok().flatten());
+
+    let origin = target
+        .as_ref()
+        .map(|m| {
+            let p = m.position();
+            (p.x, p.y)
+        })
+        .unwrap_or((0, 0));
+    if let Some(state) = app.try_state::<AppState>() {
+        if let Ok(mut guard) = state.overlay_origin.lock() {
+            *guard = origin;
+        }
+    }
 
     if let Some(mon) = target {
         overlay
@@ -65,9 +80,7 @@ fn show_overlay(app: &AppHandle) -> Result<(), String> {
             .map_err(|e| e.to_string())?;
     }
 
-    overlay
-        .set_always_on_top(true)
-        .map_err(|e| e.to_string())?;
+    overlay.set_always_on_top(true).map_err(|e| e.to_string())?;
     overlay.show().map_err(|e| e.to_string())?;
     overlay.set_focus().map_err(|e| e.to_string())?;
     Ok(())
@@ -154,10 +167,9 @@ fn combine_codes(codes: &[(String, String)]) -> Option<(String, String)> {
         return None;
     }
     let content = contents.join("\n");
-    let format = if formats.len() == 1 {
-        formats.pop().expect("non-empty")
-    } else {
-        formats.join(" | ")
+    let format = match formats.as_slice() {
+        [only] => only.clone(),
+        _ => formats.join(" | "),
     };
     Some((content, format))
 }
@@ -206,24 +218,31 @@ fn process_scan(app: &AppHandle, img: DynamicImage) -> Result<ScanResult, String
     };
 
     if result.kind != "none" {
-        let _ = clipboard::copy_text(&result.content);
         let state = app.state::<AppState>();
         let hist = state.history.lock().map_err(|e| e.to_string())?;
         let png = result
             .preview
             .as_ref()
             .and_then(|p| base64::engine::general_purpose::STANDARD.decode(p).ok());
-        let _ = hist.insert(
+        hist.insert(
             result.timestamp,
             &result.kind,
             &result.content,
             &result.format,
             png.as_deref(),
-        );
+        )
+        .map_err(|e| format!("history: {e}"))?;
+        // Jangan pernah bilang "copied" kalau clipboard sebenarnya gagal.
+        clipboard::copy_text(&result.content).map_err(|e| format!("clipboard: {e}"))?;
     }
 
     let _ = app.emit("scan-result", result.clone());
     Ok(result)
+}
+
+fn emit_scan_error(app: &AppHandle, error: &str) {
+    let _ = app.emit("scan-error", error.to_string());
+    log::error!("[scan] {error}");
 }
 
 #[tauri::command]
@@ -239,22 +258,32 @@ fn cancel_scan(app: AppHandle) -> Result<(), String> {
 #[tauri::command]
 async fn finish_scan(app: AppHandle, region: Region, dpr: f64) -> Result<ScanResult, String> {
     hide_overlay(&app)?;
+    let origin = app
+        .state::<AppState>()
+        .overlay_origin
+        .lock()
+        .map(|guard| *guard)
+        .unwrap_or((0, 0));
+    let error_handle = app.clone();
 
-    tauri::async_runtime::spawn_blocking(move || {
+    let outcome = tauri::async_runtime::spawn_blocking(move || {
         // Let the compositor actually remove the overlay before grabbing the
         // screen, otherwise the screenshot can capture its dim layer.
         std::thread::sleep(Duration::from_millis(120));
 
-        let img = capture::capture_region(&region, dpr).map_err(|e| e.to_string())?;
+        let img = capture::capture_region(&region, dpr, origin).map_err(|e| e.to_string())?;
         process_scan(&app, img)
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())?;
+
+    outcome.inspect_err(|e: &String| emit_scan_error(&error_handle, e))
 }
 
 #[tauri::command]
 async fn scan_image(app: AppHandle, image_b64: String) -> Result<ScanResult, String> {
-    tauri::async_runtime::spawn_blocking(move || {
+    let error_handle = app.clone();
+    let outcome = tauri::async_runtime::spawn_blocking(move || {
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(&image_b64)
             .map_err(|e| e.to_string())?;
@@ -262,12 +291,15 @@ async fn scan_image(app: AppHandle, image_b64: String) -> Result<ScanResult, Str
         process_scan(&app, img)
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())?;
+
+    outcome.inspect_err(|e: &String| emit_scan_error(&error_handle, e))
 }
 
 #[tauri::command]
 async fn scan_clipboard_image(app: AppHandle) -> Result<Option<ScanResult>, String> {
-    tauri::async_runtime::spawn_blocking(move || {
+    let error_handle = app.clone();
+    let outcome = tauri::async_runtime::spawn_blocking(move || {
         let Some(png) = clipboard::read_image_png().map_err(|e| e.to_string())? else {
             return Ok(None);
         };
@@ -275,7 +307,9 @@ async fn scan_clipboard_image(app: AppHandle) -> Result<Option<ScanResult>, Stri
         Ok(Some(process_scan(&app, img)?))
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())?;
+
+    outcome.inspect_err(|e: &String| emit_scan_error(&error_handle, e))
 }
 
 #[tauri::command]
@@ -318,18 +352,25 @@ fn app_info() -> AppInfo {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
-        .plugin(
-            tauri_plugin_global_shortcut::Builder::new().build(),
-        )
-        .setup(|app| {
-            if cfg!(debug_assertions) {
-                app.handle().plugin(
-                    tauri_plugin_log::Builder::default()
-                        .level(log::LevelFilter::Info)
-                        .build(),
-                )?;
+    let result = tauri::Builder::default()
+        // Harus didaftarkan paling awal: instance kedua langsung fokus window
+        // yang sudah ada sebelum shortcut/tray sempat diduplikasi.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.unminimize();
+                let _ = window.show();
+                let _ = window.set_focus();
             }
+        }))
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .setup(|app| {
+            let level = if cfg!(debug_assertions) {
+                log::LevelFilter::Info
+            } else {
+                log::LevelFilter::Warn
+            };
+            app.handle()
+                .plugin(tauri_plugin_log::Builder::default().level(level).build())?;
 
             let dir = app.path().app_data_dir()?;
             let hist = history::History::new(&dir)?;
@@ -337,6 +378,7 @@ pub fn run() {
             app.manage(AppState {
                 history: Mutex::new(hist),
                 ocr: Mutex::new(None),
+                overlay_origin: Mutex::new((0, 0)),
             });
 
             for window_config in app.config().app.windows.iter() {
@@ -344,18 +386,16 @@ pub fn run() {
             }
 
             let handle = app.handle().clone();
-            tauri::async_runtime::spawn_blocking(move || {
-                match load_ocr_engine(&handle) {
-                    Ok(engine) => {
-                        log::info!("[ocr] PaddleOCR engine ready ({})", ocr_text::status());
-                        if let Some(state) = handle.try_state::<AppState>() {
-                            if let Ok(mut guard) = state.ocr.lock() {
-                                *guard = Some(engine);
-                            }
+            tauri::async_runtime::spawn_blocking(move || match load_ocr_engine(&handle) {
+                Ok(engine) => {
+                    log::info!("[ocr] PaddleOCR engine ready ({})", ocr_text::status());
+                    if let Some(state) = handle.try_state::<AppState>() {
+                        if let Ok(mut guard) = state.ocr.lock() {
+                            *guard = Some(engine);
                         }
                     }
-                    Err(e) => log::error!("[ocr] failed to initialize engine: {e}"),
                 }
+                Err(e) => log::error!("[ocr] failed to initialize engine: {e}"),
             });
 
             let show = MenuItem::with_id(app, "show", "Open OCR Scan Tool", true, None::<&str>)?;
@@ -427,6 +467,47 @@ pub fn run() {
             set_autostart,
             get_autostart
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .run(tauri::generate_context!());
+
+    if let Err(e) = result {
+        log::error!("[app] failed to run application: {e}");
+        std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn combine_codes_returns_none_when_empty() {
+        assert_eq!(combine_codes(&[]), None);
+    }
+
+    #[test]
+    fn combine_codes_deduplicates_and_keeps_single_format() {
+        let codes = vec![
+            ("ABC-123".to_string(), "CODE_128".to_string()),
+            ("ABC-123".to_string(), "CODE_128".to_string()),
+        ];
+        assert_eq!(
+            combine_codes(&codes),
+            Some(("ABC-123".to_string(), "CODE_128".to_string()))
+        );
+    }
+
+    #[test]
+    fn combine_codes_joins_distinct_codes_and_formats() {
+        let codes = vec![
+            ("ABC-123".to_string(), "CODE_128".to_string()),
+            ("https://example.com".to_string(), "QR_CODE".to_string()),
+        ];
+        assert_eq!(
+            combine_codes(&codes),
+            Some((
+                "ABC-123\nhttps://example.com".to_string(),
+                "CODE_128 | QR_CODE".to_string()
+            ))
+        );
+    }
 }

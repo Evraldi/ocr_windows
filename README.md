@@ -1,36 +1,64 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# OCR Scan Tool
 
-## Getting Started
+Aplikasi desktop Windows untuk scan barcode/QR dan teks dari area layar, gambar file, atau clipboard. Shortcut global: **Ctrl+Shift+S**.
 
-First, run the development server:
+## Prasyarat
+
+- Windows 10/11
+- Node.js 24 (lihat `.nvmrc`)
+- Rust toolchain stabil (via [rustup](https://rustup.rs/))
+- WebView2 Runtime (sudah ada di Windows 11 / kebanyakan Windows 10)
+- Visual Studio Build Tools dengan **Desktop development with C++** (dibutuhkan `ort-sys`)
+
+## Development
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+npm ci
+npm run tauri dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+`npm run tauri dev` otomatis menjalankan `next dev` dan membuka jendela Tauri. Jangan pakai `cargo tauri` — script npm adalah entry point yang didukung.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Build installer
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+```bash
+npm run tauri build
+```
 
-## Learn More
+Hasil: installer NSIS (`.exe`) dan MSI di `src-tauri/target/release/bundle/`.
 
-To learn more about Next.js, take a look at the following resources:
+ONNX Runtime di-link **statically** oleh `ort-sys` (default feature `download-binaries`), jadi tidak ada `onnxruntime.dll` yang perlu disalin ke installer. Build membutuhkan akses network sekali untuk mengunduh binary yang diverifikasi SHA-256; setelah itu cache di `%LOCALAPPDATA%\ort.pyke.io` dipakai ulang.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+Model PaddleOCR ada di `src-tauri/resources/models/` dan ikut ter-bundle ke folder `resources/models/`.
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+## Gate kualitas
 
-## Deploy on Vercel
+```bash
+npm run typecheck
+npm run lint
+npm test
+npm run build
+npm run audit:prod
+cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+cargo test --manifest-path src-tauri/Cargo.toml
+cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+```
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+`audit:prod` memakai `audit-allowlist.json` untuk advisory yang memang tidak reachable dari static export. Allowlist punya tanggal kedaluwarsa; perbarui setelah ditinjau.
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+## Arsitektur singkat
+
+- `src/app/page.tsx` — UI utama, history, import/paste gambar, autostart.
+- `src/app/overlay/page.tsx` — overlay drag-select, mengirim region CSS + DPR ke backend.
+- `src-tauri/src/capture.rs` — konversi region ke koordinat physical absolut dan crop lintas monitor.
+- `src-tauri/src/decode_code.rs` — QR/Code128 via `rxing`.
+- `src-tauri/src/ocr_text.rs` — fallback teks via `paddle-ocr-rs` / ONNX.
+- `src-tauri/src/history.rs` — SQLite di app data directory.
+- `src-tauri/src/clipboard.rs` — copy/read clipboard gambar.
+
+## Catatan keamanan
+
+- CSP aktif baik di produksi maupun dev (`devCsp` mengizinkan HMR).
+- Single-instance plugin aktif: instance kedua hanya memfokuskan jendela yang sudah ada.
+- Tidak ada updater atau code signing yang diaktifkan tanpa sertifikat/kunci dan endpoint yang valid.
+- Semua data (history, model, hasil scan) lokal; tidak ada telemetry atau jaringan dari aplikasi.

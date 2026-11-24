@@ -1,5 +1,6 @@
 "use client";
 
+/* eslint-disable @next/next/no-img-element -- Tauri static export pakai data URI; next/image tidak punya optimizer di sini */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, formatTimestamp } from "@/lib/api";
 import type { AppInfo, HistoryEntry, ScanResult } from "@/lib/api";
@@ -16,6 +17,7 @@ export default function Home() {
   const [autoStart, setAutoStart] = useState(false);
   const [viewImage, setViewImage] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+  const lastTimestamp = useRef<number | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -31,6 +33,10 @@ export default function Home() {
         setToast({ text: "No image in clipboard", ok: false });
         return;
       }
+      // Backend memancarkan event sekaligus mengembalikan hasil invoke.
+      // Tanpa guard ini toast/history refresh dua kali per scan.
+      if (lastTimestamp.current === result.timestamp) return;
+      lastTimestamp.current = result.timestamp;
       setLast(result);
       if (result.kind !== "none") {
         setToast({ text: `${result.format} copied to clipboard`, ok: true });
@@ -51,6 +57,10 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
+    let active = true;
+    const unlistenError = api.onScanError((message) => {
+      if (active) setToast({ text: message, ok: false });
+    });
     api.appInfo().then(setInfo).catch((e) => setToast({ text: String(e), ok: false }));
     api
       .getAutostart()
@@ -66,9 +76,17 @@ export default function Home() {
     load();
     const unlisten = api.onScanResult(handleResult);
     return () => {
+      active = false;
       unlisten.then((fn) => fn());
+      unlistenError.then((fn) => fn());
     };
   }, [handleResult]);
+
+  useEffect(() => {
+    if (!toast) return;
+    const timer = setTimeout(() => setToast(null), 5000);
+    return () => clearTimeout(timer);
+  }, [toast]);
 
   const fileToB64 = (file: File): Promise<string> =>
     new Promise((resolve, reject) => {
@@ -135,7 +153,22 @@ export default function Home() {
     }
   };
 
+  const scanClipboard = async () => {
+    setBusy(true);
+    setToast({ text: "Scanning clipboard image…", ok: true });
+    try {
+      handleResult(await api.scanClipboardImage());
+    } catch (err) {
+      setToast({ text: String(err), ok: false });
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const clear = async () => {
+    if (!window.confirm("Hapus semua riwayat scan? Tindakan ini tidak bisa dibatalkan.")) {
+      return;
+    }
     try {
       await api.clearHistory();
       setHistory([]);
@@ -212,6 +245,14 @@ export default function Home() {
             title="Scan an image file (or press Ctrl+V to paste one)"
           >
             Import Image
+          </button>
+          <button
+            onClick={scanClipboard}
+            disabled={busy}
+            className="rounded-lg border border-zinc-700 px-3 py-2 text-sm text-zinc-300 transition-colors hover:bg-zinc-800 disabled:opacity-40"
+            title="Scan image currently in the clipboard"
+          >
+            Scan Clipboard
           </button>
           <button
             onClick={() => api.startScan().catch((e) => setToast({ text: String(e), ok: false }))}

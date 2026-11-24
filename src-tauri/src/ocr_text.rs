@@ -5,7 +5,12 @@ pub fn status() -> String {
     "PaddleOCR PP-OCRv4 (ONNX)".to_string()
 }
 
-pub fn init(det_model: &[u8], cls_model: &[u8], rec_model: &[u8], threads: usize) -> Result<OcrLite, String> {
+pub fn init(
+    det_model: &[u8],
+    cls_model: &[u8],
+    rec_model: &[u8],
+    threads: usize,
+) -> Result<OcrLite, String> {
     let mut ocr = OcrLite::new();
     ocr.init_models_from_memory(det_model, cls_model, rec_model, threads)
         .map_err(|e| e.to_string())?;
@@ -43,7 +48,8 @@ mod tests {
             .join("resources")
             .join("models");
         let det = std::fs::read(dir.join("ch_PP-OCRv4_det_infer.onnx")).expect("det model");
-        let cls = std::fs::read(dir.join("ch_ppocr_mobile_v2.0_cls_infer.onnx")).expect("cls model");
+        let cls =
+            std::fs::read(dir.join("ch_ppocr_mobile_v2.0_cls_infer.onnx")).expect("cls model");
         let rec = std::fs::read(dir.join("ch_PP-OCRv4_rec_infer.onnx")).expect("rec model");
         init(&det, &cls, &rec, 2).expect("engine init")
     }
