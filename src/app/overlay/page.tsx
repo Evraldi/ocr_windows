@@ -103,6 +103,12 @@ export default function Overlay() {
   }, []);
 
   useEffect(() => {
+    const onFocus = () => setError(null);
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, []);
+
+  useEffect(() => {
     if (!error) return;
     const timer = setTimeout(() => setError(null), 4000);
     return () => clearTimeout(timer);

@@ -63,6 +63,8 @@ export const api = {
     listen<ScanResult>("scan-result", (event) => cb(event.payload)),
   onScanError: (cb: (message: string) => void) =>
     listen<string>("scan-error", (event) => cb(event.payload)),
+  onScanBusy: (cb: (busy: boolean) => void) =>
+    listen<boolean>("scan-busy", (event) => cb(event.payload)),
 };
 
 export function formatTimestamp(ts: number): string {

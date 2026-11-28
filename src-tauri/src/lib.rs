@@ -30,6 +30,9 @@ pub struct AppState {
     /// mutex `ocr` saat `recognize_text` sedang berjalan.
     ocr_ready: AtomicBool,
     ocr_error: Mutex<Option<String>>,
+    /// Satu scan aktif secara global. Mencegah antrean tak terlihat saat
+    /// shortcut/tray dipencet berulang kali selama OCR masih berjalan.
+    scanning: AtomicBool,
     /// Origin (physical pixels) dari overlay window saat terakhir dibuka.
     /// Region dari frontend adalah CSS relatif overlay, jadi harus
     /// ditambahkan origin ini sebelum dipetakan ke monitor physical.
@@ -293,71 +296,110 @@ fn emit_scan_error(app: &AppHandle, error: &str) {
     log::error!("[scan] {error}");
 }
 
+/// Satu tempat untuk setiap error level command, supaya UI selalu dapat
+/// notifikasi walau error terjadi sebelum `process_scan` dipanggil.
+fn emit_result_error<T>(app: &AppHandle, outcome: Result<T, String>) -> Result<T, String> {
+    outcome.inspect_err(|e| emit_scan_error(app, e))
+}
+
+fn begin_scan(app: &AppHandle) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    if state
+        .scanning
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
+        .is_err()
+    {
+        return Err("a scan is already in progress".to_string());
+    }
+    let _ = app.emit("scan-busy", true);
+    Ok(())
+}
+
+fn end_scan(app: &AppHandle) {
+    if let Some(state) = app.try_state::<AppState>() {
+        state.scanning.store(false, Ordering::Release);
+    }
+    let _ = app.emit("scan-busy", false);
+}
+
+async fn run_scan<T, F>(app: AppHandle, work: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+{
+    begin_scan(&app)?;
+    let error_handle = app.clone();
+    let joined = tauri::async_runtime::spawn_blocking(work).await;
+    end_scan(&app);
+    match joined {
+        Ok(outcome) => emit_result_error(&error_handle, outcome),
+        Err(e) => {
+            let message = e.to_string();
+            emit_scan_error(&error_handle, &message);
+            Err(message)
+        }
+    }
+}
+
 #[tauri::command]
 fn start_scan(app: AppHandle) -> Result<(), String> {
-    show_overlay(&app)
+    emit_result_error(&app, show_overlay(&app))
 }
 
 #[tauri::command]
 fn cancel_scan(app: AppHandle) -> Result<(), String> {
-    hide_overlay(&app)
+    emit_result_error(&app, hide_overlay(&app))
 }
 
 #[tauri::command]
 async fn finish_scan(app: AppHandle, region: Region, dpr: f64) -> Result<ScanResult, String> {
-    hide_overlay(&app)?;
+    if let Err(e) = hide_overlay(&app) {
+        emit_scan_error(&app, &e);
+        return Err(e);
+    }
     let origin = app
         .state::<AppState>()
         .overlay_origin
         .lock()
         .map(|guard| *guard)
         .unwrap_or((0, 0));
-    let error_handle = app.clone();
+    let scan_app = app.clone();
 
-    let outcome = tauri::async_runtime::spawn_blocking(move || {
+    run_scan(app, move || {
         // Let the compositor actually remove the overlay before grabbing the
         // screen, otherwise the screenshot can capture its dim layer.
         std::thread::sleep(Duration::from_millis(120));
 
         let img = capture::capture_region(&region, dpr, origin).map_err(|e| e.to_string())?;
-        process_scan(&app, img)
+        process_scan(&scan_app, img)
     })
     .await
-    .map_err(|e| e.to_string())?;
-
-    outcome.inspect_err(|e: &String| emit_scan_error(&error_handle, e))
 }
 
 #[tauri::command]
 async fn scan_image(app: AppHandle, image_b64: String) -> Result<ScanResult, String> {
-    let error_handle = app.clone();
-    let outcome = tauri::async_runtime::spawn_blocking(move || {
+    let scan_app = app.clone();
+    run_scan(app, move || {
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(&image_b64)
             .map_err(|e| e.to_string())?;
         let img = image::load_from_memory(&bytes).map_err(|e| format!("unsupported image: {e}"))?;
-        process_scan(&app, img)
+        process_scan(&scan_app, img)
     })
     .await
-    .map_err(|e| e.to_string())?;
-
-    outcome.inspect_err(|e: &String| emit_scan_error(&error_handle, e))
 }
 
 #[tauri::command]
 async fn scan_clipboard_image(app: AppHandle) -> Result<Option<ScanResult>, String> {
-    let error_handle = app.clone();
-    let outcome = tauri::async_runtime::spawn_blocking(move || {
+    let scan_app = app.clone();
+    run_scan(app, move || {
         let Some(png) = clipboard::read_image_png().map_err(|e| e.to_string())? else {
             return Ok(None);
         };
         let img = image::load_from_memory(&png).map_err(|e| e.to_string())?;
-        Ok(Some(process_scan(&app, img)?))
+        Ok(Some(process_scan(&scan_app, img)?))
     })
     .await
-    .map_err(|e| e.to_string())?;
-
-    outcome.inspect_err(|e: &String| emit_scan_error(&error_handle, e))
 }
 
 #[tauri::command]
@@ -442,6 +484,7 @@ pub fn run() {
                 ocr: Mutex::new(None),
                 ocr_ready: AtomicBool::new(false),
                 ocr_error: Mutex::new(None),
+                scanning: AtomicBool::new(false),
                 overlay_origin: Mutex::new((0, 0)),
             });
 
@@ -505,7 +548,7 @@ pub fn run() {
                 "show" => show_main(app),
                 "scan" => {
                     if let Err(e) = show_overlay(app) {
-                        log::error!("failed to show overlay: {e}");
+                        emit_scan_error(app, &e.to_string());
                     }
                 }
                 "quit" => app.exit(0),
@@ -517,7 +560,7 @@ pub fn run() {
                 .on_shortcut(SCAN_SHORTCUT, move |app, _shortcut, event| {
                     if event.state == ShortcutState::Pressed {
                         if let Err(e) = show_overlay(app) {
-                            log::error!("failed to show overlay: {e}");
+                            emit_scan_error(app, &e.to_string());
                         }
                     }
                 })

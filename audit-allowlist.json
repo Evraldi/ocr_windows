@@ -1,17 +1,5 @@
 {
-  "reviewBy": "2026-12-31",
-  "reason": "App Tauri dengan static export Next.js: tidak ada Next server, Image Optimization API, Server Actions, next/og, atau `use cache` di runtime. Advisory berikut tidak reachable dari ASSET statis yang dikirim ke WebView; ditinjau ulang sebelum 2026-12-31.",
-  "accepted": {
-    "https://github.com/advisories/GHSA-2v37-7h3g-55p8": "nanoid: hanya dipakai build tooling; custom generators dengan size=0 tidak pernah dipanggil aplikasi.",
-    "https://github.com/advisories/GHSA-p293-qw3h-jr36": "Tidak ada Next server yang diekspos; export statically ke file HTML.",
-    "https://github.com/advisories/GHSA-2xp9-vwfh-vxw4": "Image Optimization API tidak dipakai (output: export, tanpa next/image loader).",
-    "https://github.com/advisories/GHSA-vcvr-r3jv-pc5j": "Tidak ada rute next/og / ImageResponse di aplikasi.",
-    "https://github.com/advisories/GHSA-cjq9-62q9-8jv4": "Tidak ada endpoint Image Optimization yang bisa diakses.",
-    "https://github.com/advisories/GHSA-2464-fhr4-w9xw": "Tidak ada endpoint Image Optimization yang bisa diakses.",
-    "https://github.com/advisories/GHSA-p3m5-59mp-jv5r": "Tidak ada Server Actions; semua aksi lewat invoke Tauri IPC.",
-    "https://github.com/advisories/GHSA-673q-mjm6-r5xr": "Tidak ada fitur `use cache` / Cache Components yang aktif.",
-    "https://github.com/advisories/GHSA-rgj7-g3m4-5g8c": "sharp hanya transitive dependency; decoder gambar memakai crate Rust `image`, bukan sharp.",
-    "https://github.com/advisories/GHSA-wq5f-xc86-pv6w": "sharp/librsvg tidak dipanggil; preview gambar dirender langsung dari data URI.",
-    "https://github.com/advisories/GHSA-68fv-2mgg-jv7q": "source-map-js hanya dipakai saat build, tidak bisa menerima input dari pengguna saat runtime."
-  }
+  "reviewBy": "2027-03-31",
+  "reason": "Semua advisory high/critical sebelumnya sudah diperbaiki lewat Next 16.4.6 dan npm audit fix. Saat ini tidak ada advisory yang diterima; tinjau ulang secara berkala.",
+  "accepted": {}
 }

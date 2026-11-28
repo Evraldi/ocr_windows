@@ -34,6 +34,8 @@ export default function Home() {
   const [toast, setToast] = useState<Toast>(null);
   const [last, setLast] = useState<ScanResult | null>(null);
   const [busy, setBusy] = useState(false);
+  const [remoteBusy, setRemoteBusy] = useState(false);
+  const isBusy = busy || remoteBusy;
   const [autoStart, setAutoStart] = useState(false);
   const [viewImage, setViewImage] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
@@ -81,6 +83,17 @@ export default function Home() {
 
   useEffect(() => {
     let active = true;
+    const unlisten = api.onScanBusy((value) => {
+      if (active) setRemoteBusy(value);
+    });
+    return () => {
+      active = false;
+      unlisten.then((fn) => fn());
+    };
+  }, []);
+
+  useEffect(() => {
+    let active = true;
     let timer: ReturnType<typeof setTimeout> | null = null;
 
     const loadInfo = async () => {
@@ -112,7 +125,9 @@ export default function Home() {
     });
     api
       .getAutostart()
-      .then(setAutoStart)
+      .then((value) => {
+        if (active) setAutoStart(value);
+      })
       .catch((e) => setToast({ text: String(e), ok: false }));
     const load = async () => {
       try {
@@ -131,7 +146,9 @@ export default function Home() {
   }, [handleResult]);
 
   useEffect(() => {
-    if (!toast) return;
+    // Error harus tetap terlihat kalau main window sedang disembunyikan
+    // (mode tray). Success toast boleh hilang sendiri.
+    if (!toast || !toast.ok) return;
     const timer = setTimeout(() => setToast(null), 5000);
     return () => clearTimeout(timer);
   }, [toast]);
@@ -219,6 +236,7 @@ export default function Home() {
       await api.clearHistory();
       setHistory([]);
       setLast(null);
+      setViewImage(null);
       setToast({ text: "History cleared", ok: true });
     } catch (e) {
       setToast({ text: String(e), ok: false });
@@ -273,6 +291,12 @@ export default function Home() {
                       ? "OCR unavailable"
                       : "OCR loading…"}
                 </span>
+                {isBusy && (
+                  <>
+                    {" · "}
+                    <span className="text-sky-400">Scanning…</span>
+                  </>
+                )}
               </>
             ) : (
               "loading…"
@@ -298,7 +322,7 @@ export default function Home() {
           />
           <button
             onClick={() => fileRef.current?.click()}
-            disabled={busy}
+            disabled={isBusy}
             className="rounded-lg border border-zinc-700 px-3 py-2 text-sm text-zinc-300 transition-colors hover:bg-zinc-800 disabled:opacity-40"
             title="Scan an image file (or press Ctrl+V to paste one)"
           >
@@ -306,7 +330,7 @@ export default function Home() {
           </button>
           <button
             onClick={scanClipboard}
-            disabled={busy}
+            disabled={isBusy}
             className="rounded-lg border border-zinc-700 px-3 py-2 text-sm text-zinc-300 transition-colors hover:bg-zinc-800 disabled:opacity-40"
             title="Scan image currently in the clipboard"
           >
@@ -314,7 +338,8 @@ export default function Home() {
           </button>
           <button
             onClick={() => api.startScan().catch((e) => setToast({ text: String(e), ok: false }))}
-            className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-emerald-500"
+            disabled={isBusy}
+            className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-emerald-500 disabled:opacity-40"
           >
             Scan Region
           </button>
@@ -330,13 +355,24 @@ export default function Home() {
 
       {toast && (
         <div
-          className={`px-5 py-2 text-sm ${
+          className={`flex items-center justify-between gap-3 px-5 py-2 text-sm ${
             toast.ok
               ? "bg-emerald-900/40 text-emerald-200"
               : "bg-red-900/40 text-red-200"
           }`}
+          role="status"
         >
-          {toast.text}
+          <span>{toast.text}</span>
+          {!toast.ok && (
+            <button
+              type="button"
+              aria-label="Dismiss"
+              onClick={() => setToast(null)}
+              className="rounded px-2 py-0.5 text-xs text-red-200/70 transition-colors hover:bg-red-800/50 hover:text-red-100"
+            >
+              ×
+            </button>
+          )}
         </div>
       )}
 
