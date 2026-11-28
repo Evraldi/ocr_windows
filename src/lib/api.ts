@@ -15,6 +15,7 @@ export interface ScanResult {
   format: string;
   preview: string | null;
   timestamp: number;
+  copied: boolean;
 }
 
 export interface HistoryEntry {
@@ -50,6 +51,8 @@ export const api = {
   scanClipboardImage: () =>
     call<ScanResult | null>("scan_clipboard_image", undefined, SCAN_TIMEOUT),
   getHistory: () => call<HistoryEntry[]>("get_history"),
+  getHistoryPreview: (id: number) =>
+    call<string | null>("get_history_preview", { id }),
   clearHistory: () => call("clear_history"),
   deleteHistoryEntry: (id: number) => call("delete_history_entry", { id }),
   copyToClipboard: (content: string) => call("copy_to_clipboard", { content }),

@@ -1,5 +1,5 @@
 use base64::Engine;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::models::HistoryEntry;
 
@@ -27,6 +27,17 @@ impl History {
             );",
         )
         .map_err(|e| e.to_string())?;
+
+        // DB lama hanya punya `preview` (full-size). Tambah kolom thumbnail
+        // supaya `get_history` ringan tanpa mengorbankan lightbox.
+        let has_preview_full = conn
+            .prepare("SELECT preview_full FROM history LIMIT 0")
+            .is_ok();
+        if !has_preview_full {
+            conn.execute_batch("ALTER TABLE history ADD COLUMN preview_full BLOB;")
+                .map_err(|e| e.to_string())?;
+        }
+
         Ok(Self { conn })
     }
 
@@ -37,11 +48,12 @@ impl History {
         content: &str,
         format: &str,
         preview: Option<&[u8]>,
+        preview_full: Option<&[u8]>,
     ) -> Result<i64, String> {
         self.conn
             .execute(
-                "INSERT INTO history (created_at, kind, content, format, preview) VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![created_at, kind, content, format, preview],
+                "INSERT INTO history (created_at, kind, content, format, preview, preview_full) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![created_at, kind, content, format, preview, preview_full],
             )
             .map_err(|e| e.to_string())?;
         self.conn
@@ -75,6 +87,21 @@ impl History {
             .map_err(|e| e.to_string())?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(|e| e.to_string())
+    }
+
+    /// Ambil preview full-size untuk lightbox. Tidak ikut payload `get_history`.
+    pub fn get_preview(&self, id: i64) -> Result<Option<String>, String> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT preview_full FROM history WHERE id = ?1")
+            .map_err(|e| e.to_string())?;
+        let preview: Option<Option<Vec<u8>>> = stmt
+            .query_row(params![id], |row| row.get(0))
+            .optional()
+            .map_err(|e| e.to_string())?;
+        Ok(preview
+            .flatten()
+            .map(|p| base64::engine::general_purpose::STANDARD.encode(p)))
     }
 
     pub fn clear(&self) -> Result<(), String> {
@@ -112,13 +139,22 @@ mod tests {
     fn insert_and_list_roundtrip() {
         let (history, dir) = temp_history();
         let id = history
-            .insert(100, "code", "ABC-123", "CODE_128", Some(&[1, 2, 3]))
+            .insert(
+                100,
+                "code",
+                "ABC-123",
+                "CODE_128",
+                Some(&[1, 2, 3]),
+                Some(&[4, 5, 6]),
+            )
             .expect("insert");
         let rows = history.list(10).expect("list");
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].id, id);
         assert_eq!(rows[0].content, "ABC-123");
         assert!(rows[0].preview.is_some());
+        assert!(history.get_preview(id).expect("full preview").is_some());
+        assert!(history.get_preview(999).expect("missing preview").is_none());
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -127,7 +163,7 @@ mod tests {
         let (history, dir) = temp_history();
         for i in 0..MAX_ENTRIES + 25 {
             history
-                .insert(i, "code", &format!("CODE-{i}"), "QR_CODE", None)
+                .insert(i, "code", &format!("CODE-{i}"), "QR_CODE", None, None)
                 .expect("insert");
         }
         let rows = history.list(1000).expect("list");
@@ -140,15 +176,46 @@ mod tests {
     fn delete_and_clear() {
         let (history, dir) = temp_history();
         let id = history
-            .insert(1, "text", "hello", "text", None)
+            .insert(1, "text", "hello", "text", None, None)
             .expect("insert");
         history.delete(id).expect("delete");
         assert!(history.list(10).expect("list").is_empty());
         history
-            .insert(2, "text", "again", "text", None)
+            .insert(2, "text", "again", "text", None, None)
             .expect("insert");
         history.clear().expect("clear");
         assert!(history.list(10).expect("list").is_empty());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn migrates_legacy_database_without_preview_full() {
+        let suffix = NEXT_DIR.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "ocr-scan-legacy-history-test-{}-{suffix}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create dir");
+        let conn = Connection::open(dir.join("history.db")).expect("open legacy db");
+        conn.execute_batch(
+            "CREATE TABLE history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at INTEGER NOT NULL,
+                kind TEXT NOT NULL,
+                content TEXT NOT NULL,
+                format TEXT NOT NULL DEFAULT '',
+                preview BLOB
+            );",
+        )
+        .expect("create legacy schema");
+        drop(conn);
+
+        let history = History::new(&dir).expect("migrate");
+        let id = history
+            .insert(1, "text", "legacy", "text", Some(&[1]), Some(&[2]))
+            .expect("insert after migration");
+        assert!(history.get_preview(id).expect("full preview").is_some());
         let _ = std::fs::remove_dir_all(dir);
     }
 }

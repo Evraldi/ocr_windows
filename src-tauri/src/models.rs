@@ -15,6 +15,7 @@ pub struct ScanResult {
     pub format: String,
     pub preview: Option<String>,
     pub timestamp: i64,
+    pub copied: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]

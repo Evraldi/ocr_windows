@@ -38,6 +38,11 @@ pub struct AppState {
 
 const SCAN_SHORTCUT: &str = "CommandOrControl+Shift+S";
 
+/// Preview besar untuk kartu hasil scan dan lightbox history.
+const LIVE_PREVIEW_MAX_DIM: u32 = 1600;
+/// Thumbnail ringan untuk payload `get_history`; full-size diambil on-demand.
+const HISTORY_PREVIEW_MAX_DIM: u32 = 320;
+
 fn overlay_window(app: &AppHandle) -> Result<tauri::WebviewWindow, String> {
     app.get_webview_window("overlay")
         .ok_or_else(|| "overlay window not found".to_string())
@@ -103,11 +108,10 @@ fn show_main(app: &AppHandle) {
     }
 }
 
-fn make_preview(img: &DynamicImage) -> Option<String> {
-    let max_dim = 1600u32;
+fn preview_png(img: &DynamicImage, max_dim: u32) -> Option<Vec<u8>> {
     let (w, h) = (img.width(), img.height());
     let scaled = if w.max(h) > max_dim {
-        let scale = max_dim as f64 / f64::from(w.max(h));
+        let scale = f64::from(max_dim) / f64::from(w.max(h));
         img.thumbnail(
             (f64::from(w) * scale).round().max(1.0) as u32,
             (f64::from(h) * scale).round().max(1.0) as u32,
@@ -120,7 +124,7 @@ fn make_preview(img: &DynamicImage) -> Option<String> {
     if scaled.write_to(cursor, ImageFormat::Png).is_err() {
         return None;
     }
-    Some(base64::engine::general_purpose::STANDARD.encode(&buf))
+    Some(buf)
 }
 
 fn now() -> i64 {
@@ -198,16 +202,20 @@ fn combine_codes(codes: &[(String, String)]) -> Option<(String, String)> {
 /// clipboard when something is found, stores it in history and broadcasts
 /// the `scan-result` event.
 fn process_scan(app: &AppHandle, img: DynamicImage) -> Result<ScanResult, String> {
-    let preview = make_preview(&img);
+    let preview_full = preview_png(&img, LIVE_PREVIEW_MAX_DIM);
+    let preview = preview_full
+        .as_ref()
+        .map(|buf| base64::engine::general_purpose::STANDARD.encode(buf));
 
     let codes = decode_code::decode(&img);
-    let result = if let Some((content, format)) = combine_codes(&codes) {
+    let mut result = if let Some((content, format)) = combine_codes(&codes) {
         ScanResult {
             kind: "code".into(),
             content,
             format,
             preview: preview.clone(),
             timestamp: now(),
+            copied: false,
         }
     } else {
         let state = app.state::<AppState>();
@@ -232,6 +240,7 @@ fn process_scan(app: &AppHandle, img: DynamicImage) -> Result<ScanResult, String
                 format: "text".into(),
                 preview,
                 timestamp: now(),
+                copied: false,
             },
             Ok(_) => ScanResult {
                 kind: "none".into(),
@@ -239,6 +248,7 @@ fn process_scan(app: &AppHandle, img: DynamicImage) -> Result<ScanResult, String
                 format: ocr_text::status(),
                 preview,
                 timestamp: now(),
+                copied: false,
             },
             Err(e) => return Err(e),
         }
@@ -247,24 +257,35 @@ fn process_scan(app: &AppHandle, img: DynamicImage) -> Result<ScanResult, String
     if result.kind != "none" {
         let state = app.state::<AppState>();
         let hist = state.history.lock().map_err(|e| e.to_string())?;
-        let png = result
-            .preview
-            .as_ref()
-            .and_then(|p| base64::engine::general_purpose::STANDARD.decode(p).ok());
+        let thumbnail = preview_png(&img, HISTORY_PREVIEW_MAX_DIM);
         hist.insert(
             result.timestamp,
             &result.kind,
             &result.content,
             &result.format,
-            png.as_deref(),
+            thumbnail.as_deref(),
+            preview_full.as_deref(),
         )
         .map_err(|e| format!("history: {e}"))?;
-        // Jangan pernah bilang "copied" kalau clipboard sebenarnya gagal.
-        clipboard::copy_text(&result.content).map_err(|e| format!("clipboard: {e}"))?;
+    }
+
+    // Clipboard is best-effort: history and UI must survive a locked clipboard.
+    if result.kind != "none" {
+        result.copied = copy_result_text(&result.content);
     }
 
     let _ = app.emit("scan-result", result.clone());
     Ok(result)
+}
+
+fn copy_result_text(content: &str) -> bool {
+    match clipboard::copy_text(content) {
+        Ok(()) => true,
+        Err(e) => {
+            log::warn!("[clipboard] result not copied: {e}");
+            false
+        }
+    }
 }
 
 fn emit_scan_error(app: &AppHandle, error: &str) {
@@ -356,7 +377,20 @@ fn get_autostart() -> Result<bool, String> {
 
 #[tauri::command]
 fn get_history(state: State<'_, AppState>) -> Result<Vec<HistoryEntry>, String> {
-    state.history.lock().map_err(|e| e.to_string())?.list(200)
+    state
+        .history
+        .lock()
+        .map_err(|e| e.to_string())?
+        .list(history::MAX_ENTRIES as usize)
+}
+
+#[tauri::command]
+fn get_history_preview(state: State<'_, AppState>, id: i64) -> Result<Option<String>, String> {
+    state
+        .history
+        .lock()
+        .map_err(|e| e.to_string())?
+        .get_preview(id)
 }
 
 #[tauri::command]
@@ -507,6 +541,7 @@ pub fn run() {
             scan_image,
             scan_clipboard_image,
             get_history,
+            get_history_preview,
             clear_history,
             delete_history_entry,
             copy_to_clipboard,
@@ -577,5 +612,18 @@ mod tests {
         assert!(!has_background_flag(["--background=true"]));
         assert!(!has_background_flag(["--BACKGROUND"]));
         assert!(!has_background_flag(Vec::<String>::new()));
+    }
+
+    #[test]
+    fn preview_png_respects_requested_max_dimension() {
+        let img = DynamicImage::new_rgb8(2000, 1000);
+        let full = preview_png(&img, LIVE_PREVIEW_MAX_DIM).expect("full preview");
+        let thumb = preview_png(&img, HISTORY_PREVIEW_MAX_DIM).expect("thumbnail");
+
+        let full_img = image::load_from_memory(&full).expect("decode full");
+        let thumb_img = image::load_from_memory(&thumb).expect("decode thumbnail");
+        assert_eq!(full_img.width(), LIVE_PREVIEW_MAX_DIM);
+        assert_eq!(thumb_img.width(), HISTORY_PREVIEW_MAX_DIM);
+        assert!(thumb.len() < full.len());
     }
 }

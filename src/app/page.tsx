@@ -57,7 +57,12 @@ export default function Home() {
       // dulu malah membuang scan kedua dalam detik yang sama).
       setLast(result);
       if (result.kind !== "none") {
-        setToast({ text: `${result.format} copied to clipboard`, ok: true });
+        setToast({
+          text: result.copied
+            ? `${result.format} copied to clipboard`
+            : `${result.format} detected — clipboard unavailable, use Copy`,
+          ok: result.copied,
+        });
       } else {
         setToast({ text: result.content, ok: false });
       }
@@ -108,7 +113,7 @@ export default function Home() {
     api
       .getAutostart()
       .then(setAutoStart)
-      .catch(() => undefined);
+      .catch((e) => setToast({ text: String(e), ok: false }));
     const load = async () => {
       try {
         setHistory(await api.getHistory());
@@ -183,6 +188,16 @@ export default function Home() {
     }
   };
 
+  const viewHistory = async (entry: HistoryEntry) => {
+    if (!entry.preview) return;
+    try {
+      const full = await api.getHistoryPreview(entry.id);
+      setViewImage(full ?? entry.preview);
+    } catch (e) {
+      setToast({ text: String(e), ok: false });
+    }
+  };
+
   const scanClipboard = async () => {
     setBusy(true);
     setToast({ text: "Scanning clipboard image…", ok: true });
@@ -203,6 +218,7 @@ export default function Home() {
     try {
       await api.clearHistory();
       setHistory([]);
+      setLast(null);
       setToast({ text: "History cleared", ok: true });
     } catch (e) {
       setToast({ text: String(e), ok: false });
@@ -387,7 +403,7 @@ export default function Home() {
                   <img
                     src={`data:image/png;base64,${h.preview}`}
                     alt="captured region"
-                    onClick={() => setViewImage(h.preview!)}
+                    onClick={() => viewHistory(h)}
                     className="mt-0.5 h-12 w-12 flex-none cursor-pointer rounded border border-zinc-700 object-contain transition-colors hover:border-emerald-500"
                   />
                 ) : (
@@ -416,21 +432,21 @@ export default function Home() {
                 <div className="flex flex-none items-center gap-1">
                   {h.preview && (
                     <button
-                      onClick={() => setViewImage(h.preview!)}
-                      className="rounded-lg bg-zinc-800 px-3 py-1.5 text-xs text-zinc-200 opacity-0 transition-opacity hover:bg-zinc-700 group-hover:opacity-100"
+                      onClick={() => viewHistory(h)}
+                      className="rounded-lg bg-zinc-800 px-3 py-1.5 text-xs text-zinc-200 opacity-0 transition-opacity hover:bg-zinc-700 focus-visible:opacity-100 group-focus-within:opacity-100"
                     >
                       View
                     </button>
                   )}
                   <button
                     onClick={() => copy(h.content)}
-                    className="rounded-lg bg-zinc-800 px-3 py-1.5 text-xs text-zinc-200 opacity-0 transition-opacity hover:bg-zinc-700 group-hover:opacity-100"
+                    className="rounded-lg bg-zinc-800 px-3 py-1.5 text-xs text-zinc-200 opacity-0 transition-opacity hover:bg-zinc-700 focus-visible:opacity-100 group-focus-within:opacity-100"
                   >
                     Copy
                   </button>
                   <button
                     onClick={() => removeEntry(h.id)}
-                    className="rounded-lg px-2.5 py-1.5 text-xs text-zinc-500 opacity-0 transition-opacity hover:bg-red-900/40 hover:text-red-300 group-hover:opacity-100"
+                    className="rounded-lg px-2.5 py-1.5 text-xs text-zinc-500 opacity-0 transition-opacity hover:bg-red-900/40 hover:text-red-300 focus-visible:opacity-100 group-focus-within:opacity-100"
                     title="Delete entry"
                   >
                     ✕

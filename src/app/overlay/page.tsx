@@ -17,6 +17,7 @@ export default function Overlay() {
   const finishingRef = useRef(false);
   const [rect, setRect] = useState<Rect | null>(null);
   const [finishing, setFinishing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const reset = useCallback(() => {
     dragging.current = false;
@@ -54,7 +55,7 @@ export default function Overlay() {
       .finishScan(selected, window.devicePixelRatio)
       .catch((err) => {
         api.cancelScan().catch(() => undefined);
-        throw err;
+        setError(String(err));
       })
       .finally(() => {
         finishingRef.current = false;
@@ -101,6 +102,12 @@ export default function Overlay() {
     };
   }, []);
 
+  useEffect(() => {
+    if (!error) return;
+    const timer = setTimeout(() => setError(null), 4000);
+    return () => clearTimeout(timer);
+  }, [error]);
+
   return (
     <div
       className="fixed inset-0 cursor-crosshair select-none overflow-hidden"
@@ -129,6 +136,12 @@ export default function Overlay() {
           Drag to select a region
           <br />
           <span className="text-xs text-zinc-300">Press Esc to cancel</span>
+        </div>
+      )}
+
+      {error && (
+        <div className="pointer-events-none absolute left-1/2 top-24 -translate-x-1/2 rounded bg-red-900/90 px-4 py-2 text-center text-sm text-red-100">
+          {error}
         </div>
       )}
 
