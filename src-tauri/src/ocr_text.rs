@@ -30,6 +30,41 @@ fn detect_blocks(ocr: &mut OcrLite, image: &DynamicImage) -> Result<Vec<TextBloc
     Ok(result.text_blocks)
 }
 
+/// Model PP-OCRv4 membaca beberapa glyph dengan salah tapi confidence tinggi:
+/// `€` jadi `∈`, `✓` jadi `√` atau `v`. Perbaikan ini sengaja sempit hanya
+/// pada konteks yang terobservasi di fixture, supaya teks matematika asli
+/// (`√9`, `x∈y`) tidak ikut berubah.
+fn normalize_symbols(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    for (i, ch) in chars.iter().enumerate() {
+        let next = chars.get(i + 1).copied();
+        match ch {
+            '∈' if next.is_some_and(|n| n.is_ascii_digit()) => out.push('€'),
+            '√' if !next.is_some_and(|n| n.is_ascii_digit()) => out.push('✓'),
+            _ => out.push(*ch),
+        }
+    }
+    normalize_checkbox_word(&out)
+}
+
+fn normalize_checkbox_word(text: &str) -> String {
+    text.lines()
+        .map(|line| {
+            const CHECK_WORDS: [&str; 4] = ["ok", "check", "done", "yes"];
+            let mut parts: Vec<String> = line.split_whitespace().map(str::to_string).collect();
+            let previous_is_check = parts
+                .get(parts.len().saturating_sub(2))
+                .is_some_and(|p| CHECK_WORDS.iter().any(|word| p.eq_ignore_ascii_case(word)));
+            if parts.last().is_some_and(|p| p.eq_ignore_ascii_case("v")) && previous_is_check {
+                *parts.last_mut().expect("checked above") = "✓".to_string();
+            }
+            parts.join(" ")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 pub fn recognize_text(ocr: &mut OcrLite, image: &DynamicImage) -> Result<Option<String>, String> {
     let text = detect_blocks(ocr, image)?
         .iter()
@@ -39,7 +74,7 @@ pub fn recognize_text(ocr: &mut OcrLite, image: &DynamicImage) -> Result<Option<
         .collect::<Vec<_>>()
         .join("\n");
 
-    let text = text.trim().to_string();
+    let text = normalize_symbols(text.trim());
     if text.is_empty() {
         Ok(None)
     } else {
@@ -144,6 +179,59 @@ mod tests {
             recognize_text(&mut engine, &degraded).expect("recognize degraded"),
             None,
             "low-confidence read must not be copied"
+        );
+    }
+
+    #[test]
+    fn normalizes_observed_ocr_symbol_confusions() {
+        assert_eq!(
+            normalize_symbols("Total ∈12,95 → OK v"),
+            "Total €12,95 → OK ✓"
+        );
+        assert_eq!(normalize_symbols("OK √"), "OK ✓");
+        assert_eq!(normalize_symbols("CHECK√ OK"), "CHECK✓ OK");
+        // Konteks matematika tidak diubah.
+        assert_eq!(normalize_symbols("√9"), "√9");
+        assert_eq!(normalize_symbols("x∈y"), "x∈y");
+        assert_eq!(normalize_symbols("Version v2"), "Version v2");
+    }
+
+    #[test]
+    fn symbol_fixtures_match_accuracy_gate() {
+        let mut engine = load_engine();
+        let cases: [(&str, Option<&str>); 6] = [
+            (
+                "ocr-symbols-ascii.png",
+                Some("INV-2026/11 #0042 @ 100% & $12.50 (paid) = OK"),
+            ),
+            (
+                "ocr-symbols-dense.png",
+                Some("A@B#C$D%E&F*G(H)I[J]K{L}M=N+O-P_Q:R;S,T.U?"),
+            ),
+            (
+                "ocr-currency-id.png",
+                Some("Total Rp 1.250,00 + PPN 10% = Rp 1.375,00"),
+            ),
+            ("ocr-plain-lower.png", Some("invoice 12345 paid today")),
+            ("ocr-symbols-unicode.png", Some("Total 12,95 → OK ✓")),
+            ("ocr-symbols-unicode-large.png", Some("Total €12,95 → OK ✓")),
+        ];
+        for (name, expected) in cases {
+            let actual = recognize_text(&mut engine, &fixture(name)).expect("recognize");
+            assert_eq!(actual.as_deref(), expected, "{name}: teks salah");
+        }
+
+        // Fixture padat sengaja tidak di-assert penuh: model menggabungkan
+        // beberapa baris dan memotong ujungnya. Yang penting, glyph hasil
+        // confusion tidak dibawa ke clipboard.
+        let wide = recognize_text(&mut engine, &fixture("ocr-symbols-wide.png"))
+            .expect("recognize wide")
+            .expect("wide fixture should produce text");
+        assert!(!wide.contains('√'), "glyph √ bocor: {wide}");
+        assert!(!wide.contains('∈'), "glyph ∈ bocor: {wide}");
+        assert!(
+            wide.contains("CHECK✓"),
+            "centang tidak dinormalisasi: {wide}"
         );
     }
 }
