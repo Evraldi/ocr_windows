@@ -9,6 +9,7 @@ mod preprocess;
 
 use std::io::Cursor;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -25,6 +26,10 @@ use crate::models::{AppInfo, HistoryEntry, Region, ScanResult};
 pub struct AppState {
     history: Mutex<history::History>,
     ocr: Mutex<Option<OcrLite>>,
+    /// Status engine untuk UI. Atomic supaya `app_info` tidak menunggu
+    /// mutex `ocr` saat `recognize_text` sedang berjalan.
+    ocr_ready: AtomicBool,
+    ocr_error: Mutex<Option<String>>,
     /// Origin (physical pixels) dari overlay window saat terakhir dibuka.
     /// Region dari frontend adalah CSS relatif overlay, jadi harus
     /// ditambahkan origin ini sebelum dipetakan ke monitor physical.
@@ -122,6 +127,21 @@ fn now() -> i64 {
     chrono::Utc::now().timestamp()
 }
 
+fn ocr_unavailable_error(detail: Option<String>) -> String {
+    match detail {
+        Some(detail) => format!("OCR engine unavailable: {detail}"),
+        None => "OCR engine is still loading; try again in a moment".to_string(),
+    }
+}
+
+fn has_background_flag<I, S>(args: I) -> bool
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    args.into_iter().any(|arg| arg.as_ref() == "--background")
+}
+
 fn models_dir(app: &AppHandle) -> PathBuf {
     use tauri::path::BaseDirectory;
     if let Ok(p) = app.path().resolve("models", BaseDirectory::Resource) {
@@ -191,13 +211,19 @@ fn process_scan(app: &AppHandle, img: DynamicImage) -> Result<ScanResult, String
         }
     } else {
         let state = app.state::<AppState>();
-        let mut ocr_guard = state.ocr.lock().map_err(|e| e.to_string())?;
-        let mut ocr = ocr_guard.take();
-        let ocr_out = match &mut ocr {
-            Some(engine) => ocr_text::recognize_text(engine, &img),
-            None => Err("OCR engine not initialized".to_string()),
+        let ocr_out = {
+            let mut ocr_guard = state.ocr.lock().map_err(|e| e.to_string())?;
+            let mut ocr = ocr_guard.take();
+            let out = match &mut ocr {
+                Some(engine) => ocr_text::recognize_text(engine, &img),
+                None => {
+                    let detail = state.ocr_error.lock().ok().and_then(|guard| guard.clone());
+                    Err(ocr_unavailable_error(detail))
+                }
+            };
+            *ocr_guard = ocr;
+            out
         };
-        *ocr_guard = ocr;
 
         match ocr_out {
             Ok(Some(text)) if !text.trim().is_empty() => ScanResult {
@@ -207,13 +233,14 @@ fn process_scan(app: &AppHandle, img: DynamicImage) -> Result<ScanResult, String
                 preview,
                 timestamp: now(),
             },
-            _ => ScanResult {
+            Ok(_) => ScanResult {
                 kind: "none".into(),
                 content: "No barcode/QR or text detected".into(),
                 format: ocr_text::status(),
                 preview,
                 timestamp: now(),
             },
+            Err(e) => return Err(e),
         }
     };
 
@@ -343,10 +370,13 @@ fn copy_to_clipboard(content: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn app_info() -> AppInfo {
+fn app_info(state: State<'_, AppState>) -> AppInfo {
+    let ocr_error = state.ocr_error.lock().ok().and_then(|guard| guard.clone());
     AppInfo {
         version: env!("CARGO_PKG_VERSION").to_string(),
         shortcut: SCAN_SHORTCUT.to_string(),
+        ocr_ready: state.ocr_ready.load(Ordering::Acquire),
+        ocr_error,
     }
 }
 
@@ -355,11 +385,9 @@ pub fn run() {
     let result = tauri::Builder::default()
         // Harus didaftarkan paling awal: instance kedua langsung fokus window
         // yang sudah ada sebelum shortcut/tray sempat diduplikasi.
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.unminimize();
-                let _ = window.show();
-                let _ = window.set_focus();
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            if !has_background_flag(args.iter().cloned()) {
+                show_main(app);
             }
         }))
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
@@ -378,11 +406,18 @@ pub fn run() {
             app.manage(AppState {
                 history: Mutex::new(hist),
                 ocr: Mutex::new(None),
+                ocr_ready: AtomicBool::new(false),
+                ocr_error: Mutex::new(None),
                 overlay_origin: Mutex::new((0, 0)),
             });
 
             for window_config in app.config().app.windows.iter() {
                 tauri::WebviewWindowBuilder::from_config(app, window_config)?.build()?;
+            }
+
+            // Normal launch opens the UI; autostart (--background) stays in tray.
+            if !has_background_flag(std::env::args().skip(1)) {
+                show_main(app.handle());
             }
 
             let handle = app.handle().clone();
@@ -392,10 +427,22 @@ pub fn run() {
                     if let Some(state) = handle.try_state::<AppState>() {
                         if let Ok(mut guard) = state.ocr.lock() {
                             *guard = Some(engine);
+                            if let Ok(mut error) = state.ocr_error.lock() {
+                                *error = None;
+                            }
+                            state.ocr_ready.store(true, Ordering::Release);
                         }
                     }
                 }
-                Err(e) => log::error!("[ocr] failed to initialize engine: {e}"),
+                Err(e) => {
+                    log::error!("[ocr] failed to initialize engine: {e}");
+                    if let Some(state) = handle.try_state::<AppState>() {
+                        if let Ok(mut error) = state.ocr_error.lock() {
+                            *error = Some(e.clone());
+                        }
+                        state.ocr_ready.store(false, Ordering::Release);
+                    }
+                }
             });
 
             let show = MenuItem::with_id(app, "show", "Open OCR Scan Tool", true, None::<&str>)?;
@@ -509,5 +556,26 @@ mod tests {
                 "CODE_128 | QR_CODE".to_string()
             ))
         );
+    }
+
+    #[test]
+    fn ocr_unavailable_error_distinguishes_loading_from_failure() {
+        assert_eq!(
+            ocr_unavailable_error(None),
+            "OCR engine is still loading; try again in a moment"
+        );
+        assert_eq!(
+            ocr_unavailable_error(Some("det model: missing".to_string())),
+            "OCR engine unavailable: det model: missing"
+        );
+    }
+
+    #[test]
+    fn has_background_flag_only_matches_exact_flag() {
+        assert!(has_background_flag(["--background"]));
+        assert!(has_background_flag(["--other", "--background"]));
+        assert!(!has_background_flag(["--background=true"]));
+        assert!(!has_background_flag(["--BACKGROUND"]));
+        assert!(!has_background_flag(Vec::<String>::new()));
     }
 }

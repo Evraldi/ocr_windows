@@ -31,4 +31,6 @@ pub struct HistoryEntry {
 pub struct AppInfo {
     pub version: String,
     pub shortcut: String,
+    pub ocr_ready: bool,
+    pub ocr_error: Option<String>,
 }

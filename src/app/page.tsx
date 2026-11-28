@@ -7,6 +7,26 @@ import type { AppInfo, HistoryEntry, ScanResult } from "@/lib/api";
 
 type Toast = { text: string; ok: boolean } | null;
 
+const FALLBACK_INFO: AppInfo = {
+  version: "?",
+  shortcut: "?",
+  ocr_ready: false,
+  ocr_error: "Could not read app status",
+};
+
+function fileToB64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const url = reader.result as string;
+      const idx = url.indexOf(",");
+      resolve(idx === -1 ? url : url.slice(idx + 1));
+    };
+    reader.onerror = () => reject(reader.error ?? new Error("read failed"));
+    reader.readAsDataURL(file);
+  });
+}
+
 export default function Home() {
   const [info, setInfo] = useState<AppInfo | null>(null);
   const [history, setHistory] = useState<HistoryEntry[]>([]);
@@ -17,7 +37,6 @@ export default function Home() {
   const [autoStart, setAutoStart] = useState(false);
   const [viewImage, setViewImage] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
-  const lastTimestamp = useRef<number | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -33,10 +52,9 @@ export default function Home() {
         setToast({ text: "No image in clipboard", ok: false });
         return;
       }
-      // Backend memancarkan event sekaligus mengembalikan hasil invoke.
-      // Tanpa guard ini toast/history refresh dua kali per scan.
-      if (lastTimestamp.current === result.timestamp) return;
-      lastTimestamp.current = result.timestamp;
+      // Hasil scan selalu datang lewat event `scan-result`, jadi invoke
+      // tidak perlu memanggil handler ini lagi (duplikat guard by timestamp
+      // dulu malah membuang scan kedua dalam detik yang sama).
       setLast(result);
       if (result.kind !== "none") {
         setToast({ text: `${result.format} copied to clipboard`, ok: true });
@@ -58,10 +76,35 @@ export default function Home() {
 
   useEffect(() => {
     let active = true;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+
+    const loadInfo = async () => {
+      try {
+        const next = await api.appInfo();
+        if (!active) return;
+        setInfo(next);
+        if (!next.ocr_ready && !next.ocr_error) {
+          timer = setTimeout(loadInfo, 1000);
+        }
+      } catch (e) {
+        if (!active) return;
+        setInfo(FALLBACK_INFO);
+        setToast({ text: String(e), ok: false });
+      }
+    };
+
+    loadInfo();
+    return () => {
+      active = false;
+      if (timer) clearTimeout(timer);
+    };
+  }, []);
+
+  useEffect(() => {
+    let active = true;
     const unlistenError = api.onScanError((message) => {
       if (active) setToast({ text: message, ok: false });
     });
-    api.appInfo().then(setInfo).catch((e) => setToast({ text: String(e), ok: false }));
     api
       .getAutostart()
       .then(setAutoStart)
@@ -88,18 +131,6 @@ export default function Home() {
     return () => clearTimeout(timer);
   }, [toast]);
 
-  const fileToB64 = (file: File): Promise<string> =>
-    new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => {
-        const url = reader.result as string;
-        const idx = url.indexOf(",");
-        resolve(idx === -1 ? url : url.slice(idx + 1));
-      };
-      reader.onerror = () => reject(reader.error ?? new Error("read failed"));
-      reader.readAsDataURL(file);
-    });
-
   useEffect(() => {
     const onPaste = (e: ClipboardEvent) => {
       const file = Array.from(e.clipboardData?.files ?? []).find((f) =>
@@ -111,13 +142,12 @@ export default function Home() {
       setToast({ text: "Scanning image…", ok: true });
       fileToB64(file)
         .then((b64) => api.scanImage(b64))
-        .then(handleResult)
         .catch((err) => setToast({ text: String(err), ok: false }))
         .finally(() => setBusy(false));
     };
     window.addEventListener("paste", onPaste);
     return () => window.removeEventListener("paste", onPaste);
-  }, [handleResult]);
+  }, []);
 
   const onPickImage = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -126,7 +156,7 @@ export default function Home() {
     setBusy(true);
     setToast({ text: "Scanning image…", ok: true });
     try {
-      handleResult(await api.scanImage(await fileToB64(file)));
+      await api.scanImage(await fileToB64(file));
     } catch (err) {
       setToast({ text: String(err), ok: false });
     } finally {
@@ -157,7 +187,8 @@ export default function Home() {
     setBusy(true);
     setToast({ text: "Scanning clipboard image…", ok: true });
     try {
-      handleResult(await api.scanClipboardImage());
+      const result = await api.scanClipboardImage();
+      if (result === null) handleResult(null);
     } catch (err) {
       setToast({ text: String(err), ok: false });
     } finally {
@@ -215,6 +246,17 @@ export default function Home() {
                   {info.shortcut}
                 </kbd>
                 {" · "}v{info.version}
+                {" · "}
+                <span
+                  className={info.ocr_ready ? "text-emerald-400" : "text-amber-400"}
+                  title={info.ocr_error ?? undefined}
+                >
+                  {info.ocr_ready
+                    ? "OCR ready"
+                    : info.ocr_error
+                      ? "OCR unavailable"
+                      : "OCR loading…"}
+                </span>
               </>
             ) : (
               "loading…"

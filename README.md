@@ -2,6 +2,8 @@
 
 Aplikasi desktop Windows untuk scan barcode/QR dan teks dari area layar, gambar file, atau clipboard. Shortcut global: **Ctrl+Shift+S**.
 
+Jalankan dari Start menu membuka jendela utama. Opsi **Start with Windows** menjalankan app di system tray lewat flag `--background` supaya tidak mengganggu saat login; klik ikon tray untuk membuka jendela.
+
 ## Prasyarat
 
 - Windows 10/11

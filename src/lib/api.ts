@@ -29,6 +29,8 @@ export interface HistoryEntry {
 export interface AppInfo {
   version: string;
   shortcut: string;
+  ocr_ready: boolean;
+  ocr_error: string | null;
 }
 
 const QUICK_TIMEOUT = 10_000;

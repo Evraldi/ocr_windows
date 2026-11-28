@@ -26,6 +26,11 @@ fn trim_path(s: &str) -> &str {
     s.trim().trim_end_matches(['\\', '/'])
 }
 
+/// Autostart harus masuk tray, bukan memunculkan jendela saat login.
+fn command_for(exe: &std::path::Path) -> String {
+    format!("\"{}\" --background", exe.display())
+}
+
 fn same_exe(a: &str, b: &str) -> bool {
     // Path Windows case-insensitive.
     trim_path(a).eq_ignore_ascii_case(trim_path(b))
@@ -42,7 +47,7 @@ pub fn set(enabled: bool) -> Result<(), String> {
     let key = run_key()?;
     if enabled {
         let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-        key.set_value(VALUE_NAME, &format!("\"{}\"", exe.display()))
+        key.set_value(VALUE_NAME, &command_for(&exe))
             .map_err(|e| e.to_string())?;
     } else {
         match key.delete_value(VALUE_NAME) {
@@ -105,5 +110,16 @@ mod tests {
     fn compares_paths_case_insensitively() {
         assert!(same_exe(r"C:\Apps\App.EXE", r"c:\apps\app.exe"));
         assert!(!same_exe(r"C:\Apps\other.exe", r"C:\Apps\app.exe"));
+    }
+
+    #[test]
+    fn autostart_command_keeps_background_flag() {
+        let exe = std::path::Path::new(r"C:\Apps\OCR Scan Tool\ocr.exe");
+        let command = command_for(exe);
+        assert_eq!(command, r#""C:\Apps\OCR Scan Tool\ocr.exe" --background"#);
+        assert_eq!(
+            executable_from_command(&command),
+            r"C:\Apps\OCR Scan Tool\ocr.exe"
+        );
     }
 }
