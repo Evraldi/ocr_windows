@@ -66,4 +66,21 @@ mod tests {
         let res = recognize_text(&mut engine, &img).expect("recognize");
         assert!(res.is_none(), "blank image should yield no text");
     }
+
+    #[test]
+    fn noise_image_yields_no_text() {
+        use image::Rgb;
+        let mut engine = load_engine();
+        let mut rgb = DynamicImage::new_rgb8(640, 160).to_rgb8();
+        let mut seed = 0x1234_5678u32;
+        for y in 0..rgb.height() {
+            for x in 0..rgb.width() {
+                seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                let v = (seed >> 24) as u8;
+                rgb.put_pixel(x, y, Rgb([v, v, v]));
+            }
+        }
+        let res = recognize_text(&mut engine, &DynamicImage::ImageRgb8(rgb)).expect("recognize");
+        assert!(res.is_none(), "noise should yield no text, got {res:?}");
+    }
 }

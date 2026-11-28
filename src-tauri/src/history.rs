@@ -1,11 +1,63 @@
 use base64::Engine;
+use image::ImageFormat;
 use rusqlite::{params, Connection, OptionalExtension};
+use std::io::Cursor;
 
 use crate::models::HistoryEntry;
 
 /// Batas jumlah entri yang disimpan. Preview PNG bisa besar, jadi history
 /// tidak boleh tumbuh tanpa batas di disk pengguna.
 pub const MAX_ENTRIES: i64 = 500;
+
+/// Kecilkan PNG legacy ke thumbnail supaya payload `get_history` tetap ringan.
+/// Kalau blob-nya bukan PNG yang bisa dibaca, thumbnail dibuang — lightbox
+/// tetap memakai `preview_full` yang asli.
+fn thumbnail_png(full: &[u8]) -> Option<Vec<u8>> {
+    let img = image::load_from_memory(full).ok()?;
+    let scaled = img.thumbnail(
+        crate::HISTORY_PREVIEW_MAX_DIM,
+        crate::HISTORY_PREVIEW_MAX_DIM,
+    );
+    let mut buf = Vec::new();
+    scaled
+        .write_to(&mut Cursor::new(&mut buf), ImageFormat::Png)
+        .ok()?;
+    Some(buf)
+}
+
+/// Row dari DB lama punya `preview` berisi PNG 1600px dan belum punya
+/// `preview_full`. Pindahkan full preview ke kolom baru, lalu ganti `preview`
+/// dengan thumbnail. Aman dijalankan ulang: hanya row dengan `preview_full`
+/// NULL yang diproses.
+fn migrate_legacy_previews(conn: &mut Connection) -> Result<(), String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, preview FROM history WHERE preview_full IS NULL AND preview IS NOT NULL",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    drop(stmt);
+    if rows.is_empty() {
+        return Ok(());
+    }
+
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    for (id, full) in rows {
+        let thumbnail = thumbnail_png(&full);
+        tx.execute(
+            "UPDATE history SET preview_full = ?1, preview = ?2 WHERE id = ?3",
+            params![full, thumbnail, id],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    tx.commit().map_err(|e| e.to_string())
+}
 
 pub struct History {
     conn: Connection,
@@ -15,7 +67,7 @@ impl History {
     pub fn new(dir: &std::path::Path) -> Result<Self, String> {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
         let db_path = dir.join("history.db");
-        let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
+        let mut conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS history (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -37,6 +89,7 @@ impl History {
             conn.execute_batch("ALTER TABLE history ADD COLUMN preview_full BLOB;")
                 .map_err(|e| e.to_string())?;
         }
+        migrate_legacy_previews(&mut conn)?;
 
         Ok(Self { conn })
     }
@@ -190,6 +243,10 @@ mod tests {
 
     #[test]
     fn migrates_legacy_database_without_preview_full() {
+        use base64::Engine;
+        use image::{DynamicImage, ImageFormat};
+        use std::io::Cursor;
+
         let suffix = NEXT_DIR.fetch_add(1, Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!(
             "ocr-scan-legacy-history-test-{}-{suffix}",
@@ -209,11 +266,52 @@ mod tests {
             );",
         )
         .expect("create legacy schema");
+
+        // Row legacy: `preview` dulu paling besar 1600px, belum ada
+        // `preview_full` sama sekali.
+        let full = {
+            let img = DynamicImage::new_rgb8(640, 320);
+            let mut buf = Vec::new();
+            img.write_to(&mut Cursor::new(&mut buf), ImageFormat::Png)
+                .expect("png");
+            buf
+        };
+        conn.execute(
+            "INSERT INTO history (created_at, kind, content, format, preview)
+             VALUES (1, 'text', 'legacy', 'text', ?1)",
+            params![full],
+        )
+        .expect("insert legacy row");
         drop(conn);
 
         let history = History::new(&dir).expect("migrate");
+        let rows = history.list(10).expect("list");
+        assert_eq!(rows.len(), 1);
+        let legacy_id = rows[0].id;
+
+        // Lightbox harus tetap dapat gambar full-size dari row lama.
+        let full_b64 = base64::engine::general_purpose::STANDARD.encode(&full);
+        assert_eq!(
+            history.get_preview(legacy_id).expect("full preview"),
+            Some(full_b64)
+        );
+
+        // Payload `get_history` harus berisi thumbnail, bukan PNG 640px.
+        let thumb = base64::engine::general_purpose::STANDARD
+            .decode(rows[0].preview.as_deref().expect("thumbnail"))
+            .expect("decode thumbnail");
+        let thumb_img = image::load_from_memory(&thumb).expect("thumbnail PNG");
+        assert!(
+            thumb_img.width().max(thumb_img.height()) <= crate::HISTORY_PREVIEW_MAX_DIM,
+            "legacy thumbnail still full-size: {}x{}",
+            thumb_img.width(),
+            thumb_img.height()
+        );
+        assert!(thumb.len() < full.len());
+
+        // Row baru tetap normal setelah migrasi.
         let id = history
-            .insert(1, "text", "legacy", "text", Some(&[1]), Some(&[2]))
+            .insert(2, "text", "new", "text", Some(&[1]), Some(&[2]))
             .expect("insert after migration");
         assert!(history.get_preview(id).expect("full preview").is_some());
         let _ = std::fs::remove_dir_all(dir);
